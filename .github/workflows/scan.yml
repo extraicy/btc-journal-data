@@ -51,6 +51,17 @@ jobs:
           HL_SEL_MAX: '100'       # the 100 biggest trader positions
         run: python3 -I hl_scanner.py --n 1500 --out data
 
+      - name: Publish the latest picture for the website (branch 'live' - replaced every run, so it never grows)
+        run: |
+          [ -f live/status.json ] || { echo "no live files"; exit 0; }
+          cd live
+          git init -q -b live
+          git config user.name "hl-scanner"
+          git config user.email "hl-scanner@users.noreply.github.com"
+          git add -A
+          git commit -q -m "live $(date -u +%Y-%m-%d_%H%M)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" live
+
       - name: Keep the scanner state
         if: always()
         uses: actions/cache/save@v4

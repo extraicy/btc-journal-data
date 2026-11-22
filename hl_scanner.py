@@ -19,6 +19,8 @@ Plan mode (env HL_PLAN=1, used by the cloud job every 30 min):
   state/     = the latest known position of every account (kept in the job's cache, not in git) -> summary_all.csv:
                all known BTC / ETH positions vs Hyperliquid's total open interest (coverage %)
   summary.csv stays "top N only" so its history remains comparable.
+  levels/<date>.csv = $ of liquidation prices per price bin (BTC $100, ETH $5, +/- 20 % of the price) every run (heatmap history)
+  live/ = positions.csv (every known position), orders.csv, liquidations.csv (3 days), status.json - read by the website
 
 Usage:  python -I hl_scanner.py [--n 1500] [--out <folder>] [--orders] [--fills]
         default out: ../data-csv/positioning/hyperliquid  (env HL_OUT overrides)
@@ -55,6 +57,8 @@ SLICE = int(os.environ.get('HL_SLICE', '4000'))
 BIG_USD = 1_000_000
 STATE = os.environ.get('HL_STATE') or os.path.join(HERE, 'state')
 FEED_DAYS = 14
+LIVE = os.environ.get('HL_LIVE') or os.path.join(HERE, 'live')   # latest picture for the website (pushed to the 'live' branch, no history)
+STEP = {'BTC': 100.0, 'ETH': 5.0}                                 # price bins of the heatmap levels files
 
 
 
@@ -130,20 +134,20 @@ def load_state():
     return st
 
 
-def update_state(states, rows, stamp):
+def update_state(states, rows, stamp, mids=None):
     """Merge this run into state/latest.csv and append the whole-market estimate to summary_all.csv (coverage vs total OI)."""
     st = load_state()
     for addr, s_ in states:
         if s_ is not None: st[addr] = []                     # re-read: forget the old positions of this account
     for r in rows:                                           # rows: time, address, coin, size, entry, liq, value, ...
-        st.setdefault(r[1], []).append([r[2], r[3], r[4], r[6], r[5], stamp])
+        st.setdefault(r[1], []).append([r[2], r[3], r[4], r[6], r[5], stamp, r[10], r[12], r[9]])
     os.makedirs(STATE, exist_ok=True)
     with open(os.path.join(STATE, 'latest.csv'), 'w', newline='', encoding='utf-8') as fh:
-        w = csv.writer(fh); w.writerow(['address', 'coin', 'size', 'entry_px', 'value_usd', 'liq_px', 'seen_utc'])
+        w = csv.writer(fh); w.writerow(['address', 'coin', 'size', 'entry_px', 'value_usd', 'liq_px', 'seen_utc', 'mm_like', 'account_value', 'leverage'])
         for a, ps in st.items():
             if ps:
                 for x in ps: w.writerow([a] + x)
-            else: w.writerow([a, '', '', '', '', '', stamp])   # known account, no BTC / ETH position
+            else: w.writerow([a, '', '', '', '', '', stamp, '', '', ''])   # known account, no BTC / ETH position
     meta, ctx = post({'type': 'metaAndAssetCtxs'}, 20)
     oi = {m['name']: float(c['openInterest']) * float(c['markPx']) for m, c in zip(meta['universe'], ctx) if m['name'] in COINS}
     now = dt.datetime.strptime(stamp, '%Y-%m-%d %H:%M')
@@ -156,7 +160,57 @@ def update_state(states, rows, stamp):
                     round(100 * L / oi[c], 1) if oi.get(c) else '', round(100 * S / oi[c], 1) if oi.get(c) else '', round(age, 1)])
     write(os.path.join(OUT, 'summary_all.csv'), ['time_utc', 'coin', 'accounts_known', 'positions', 'long_usd', 'short_usd', 'total_oi_usd',
           'long_share_pct', 'short_share_pct', 'oldest_reading_h'], out, append=True)
+    try: write_levels_and_live(st, stamp, mids or {}, oi, out)
+    except Exception as e: print('live / levels failed:', e, flush=True)
     return 'coverage: ' + ' · '.join(f'{r[1]} {r[7]} % long / {r[8]} % short of ${r[6] / 1e9:.2f}B' for r in out) + f' ({len(st)} accounts known)'
+
+
+def _plain(path, header, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', newline='', encoding='utf-8') as fh:
+        w = csv.writer(fh); w.writerow(header); w.writerows(rows)
+
+
+def write_levels_and_live(st, stamp, mids, oi, cover):
+    """levels/<date>.csv (heatmap history, appended) + live/positions.csv + live/status.json (overwritten)."""
+    lv = []
+    for c in COINS:
+        mid = float(mids.get(c) or 0)
+        if not mid: continue
+        step = STEP[c]; bins = {}
+        for v in st.values():
+            for x in v:
+                if x[0] != c or not x[4]: continue
+                lp = float(x[4])
+                if abs(lp / mid - 1) > 0.2: continue
+                b = round(lp / step) * step; long_ = float(x[1]) > 0; trader = (x[6] if len(x) > 6 else '0') in ('0', 0, '')
+                e = bins.setdefault(b, [0.0, 0.0, 0.0, 0.0])
+                e[0 if long_ else 1] += float(x[3])
+                if trader: e[2 if long_ else 3] += float(x[3])
+        lv += [[stamp, c, mid, b, round(e[0]), round(e[1]), round(e[2]), round(e[3])] for b, e in sorted(bins.items())]
+    if lv:
+        write(os.path.join(OUT, 'levels', stamp[:10] + '.csv'),
+              ['time_utc', 'coin', 'mid_px', 'price', 'long_liq_usd', 'short_liq_usd', 'long_liq_usd_traders', 'short_liq_usd_traders'], lv, append=True)
+    pos = [[a] + x[:9] for a, v in st.items() for x in v]
+    _plain(os.path.join(LIVE, 'positions.csv'), ['address', 'coin', 'size', 'entry_px', 'value_usd', 'liq_px', 'seen_utc', 'mm_like', 'account_value', 'leverage'],
+           [r + [''] * (10 - len(r)) for r in pos])
+    status = dict(updated_utc=stamp, accounts_known=len(st), coins={r[1]: dict(mid=float(mids.get(r[1]) or 0), positions=r[3], long_usd=r[4], short_usd=r[5],
+                  total_oi_usd=r[6], long_share_pct=r[7], short_share_pct=r[8], oldest_reading_h=r[9]) for r in cover})
+    os.makedirs(LIVE, exist_ok=True)
+    with open(os.path.join(LIVE, 'status.json'), 'w', encoding='utf-8') as fh: json.dump(status, fh)
+
+
+def write_live_extras(orows):
+    """live/orders.csv (this run's stop / take-profit orders) + live/liquidations.csv (last 3 days, from data/liquidations.csv)."""
+    if orows:
+        _plain(os.path.join(LIVE, 'orders.csv'), ['time_utc', 'address', 'coin', 'side', 'order_type', 'is_trigger', 'trigger_px', 'trigger_condition',
+               'limit_px', 'size', 'reduce_only', 'position_tpsl', 'placed_ms'], orows)
+    lp = os.path.join(OUT, 'liquidations.csv')
+    if os.path.exists(lp):
+        cut = (time.time() - 3 * 86400) * 1000
+        with open(lp, newline='', encoding='utf-8') as fh:
+            rd = csv.reader(fh); head = next(rd, None); keep = [r for r in rd if r and r[1].isdigit() and float(r[1]) >= cut]
+        if head: _plain(os.path.join(LIVE, 'liquidations.csv'), head, keep)
 
 
 def main():
@@ -251,16 +305,17 @@ def main():
           append=True)
     log = [f'{stamp} UTC positions: {len(info)} accounts (top {N}{plan_note}; {failed} failed), {len(rows)} BTC / ETH positions, {time.time() - t0:.0f} s']
     if PLAN:
-        try: log.append(update_state(states, rows, stamp))
+        try: log.append(update_state(states, rows, stamp, mids))
         except Exception as e: log.append(f'state / coverage failed: {e}')
 
     sel = list(dict.fromkeys(a for _, a in sorted(holders, key=lambda x: -x[0])))[:SEL_MAX]   # biggest trader positions first
+    orows_live = []
     if DO_ORDERS and sel:
         def orders(addr):
             try: return addr, post({'type': 'frontendOpenOrders', 'user': addr}, 20)
             except Exception: return addr, None
         with ThreadPoolExecutor(3) as ex: res = list(ex.map(orders, sel))
-        orows = [[stamp, a, o.get('coin'), o.get('side'), o.get('orderType'), o.get('isTrigger'), o.get('triggerPx') or '', o.get('triggerCondition') or '',
+        orows_live[:] = orows = [[stamp, a, o.get('coin'), o.get('side'), o.get('orderType'), o.get('isTrigger'), o.get('triggerPx') or '', o.get('triggerCondition') or '',
                   o.get('limitPx'), o.get('sz'), o.get('reduceOnly'), o.get('isPositionTpsl'), o.get('timestamp')]
                  for a, oo in res if oo for o in oo if o.get('coin') in COINS and (o.get('isTrigger') or o.get('reduceOnly'))]
         write(os.path.join(OUT, 'orders', day, hhmm + '.csv'),
@@ -289,6 +344,9 @@ def main():
         log.append(f'fills: {len(sel)} accounts -> {len(new)} new BTC / ETH liquidation fills, {time.time() - t0:.0f} s')
     if DO_SLOW and sel:
         with open(os.path.join(OUT, 'last_slow.txt'), 'w') as fh: fh.write(str(time.time()))
+    if PLAN:
+        try: write_live_extras(orows_live)
+        except Exception as e: log.append(f'live extras failed: {e}')
     print('\n'.join(log), flush=True)
     write(os.path.join(OUT, 'scanner_log.csv'), ['line'], [[l] for l in log], append=True)
     try:   # local mode only (not gzip): optional merge + dashboard
