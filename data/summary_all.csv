@@ -1,0 +1,3 @@
+time_utc,coin,accounts_known,positions,long_usd,short_usd,total_oi_usd,long_share_pct,short_share_pct,oldest_reading_h
+2026-11-22 22:22,BTC,5500,739,614586540,681122249,2348581140,26.2,29.0,0.0
+2026-11-22 22:22,ETH,5500,419,328861828,378971901,1054695651,31.2,35.9,0.0
