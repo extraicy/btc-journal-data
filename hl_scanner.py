@@ -20,6 +20,10 @@ Plan mode (env HL_PLAN=1, used by the cloud job every 30 min):
                all known BTC / ETH positions vs Hyperliquid's total open interest (coverage %)
   summary.csv stays "top N only" so its history remains comparable.
   levels/<date>.csv = $ of liquidation prices per price bin (BTC $100, ETH $5, +/- 20 % of the price) every run (heatmap history)
+  levels_core/<date>.csv = the same for the FIXED group read every run (top N + big) - comparable over time while coverage grows
+  positions files: an account that CLOSED a position since its last reading gets a row with size 0 (so history can be rebuilt)
+  runs.csv = one row per run: start (= the time_utc of all its rows), positions done, finished - backtests must use 'finished'
+  (the data only exists after the run is saved, ~15 min after the start) - never the start time
   live/ = positions.csv (every known position), orders.csv, liquidations.csv (3 days), status.json - read by the website
 
 Usage:  python -I hl_scanner.py [--n 1500] [--out <folder>] [--orders] [--fills]
@@ -134,12 +138,13 @@ def load_state():
     return st
 
 
-def update_state(states, rows, stamp, mids=None):
+def update_state(states, rows, stamp, mids=None, core_set=None):
     """Merge this run into state/latest.csv and append the whole-market estimate to summary_all.csv (coverage vs total OI)."""
     st = load_state()
     for addr, s_ in states:
         if s_ is not None: st[addr] = []                     # re-read: forget the old positions of this account
     for r in rows:                                           # rows: time, address, coin, size, entry, liq, value, ...
+        if not float(r[3] or 0): continue                     # size-0 = closed marker
         st.setdefault(r[1], []).append([r[2], r[3], r[4], r[6], r[5], stamp, r[10], r[12], r[9]])
     os.makedirs(STATE, exist_ok=True)
     with open(os.path.join(STATE, 'latest.csv'), 'w', newline='', encoding='utf-8') as fh:
@@ -160,7 +165,7 @@ def update_state(states, rows, stamp, mids=None):
                     round(100 * L / oi[c], 1) if oi.get(c) else '', round(100 * S / oi[c], 1) if oi.get(c) else '', round(age, 1)])
     write(os.path.join(OUT, 'summary_all.csv'), ['time_utc', 'coin', 'accounts_known', 'positions', 'long_usd', 'short_usd', 'total_oi_usd',
           'long_share_pct', 'short_share_pct', 'oldest_reading_h'], out, append=True)
-    try: write_levels_and_live(st, stamp, mids or {}, oi, out)
+    try: write_levels_and_live(st, stamp, mids or {}, oi, out, core_set or set())
     except Exception as e: print('live / levels failed:', e, flush=True)
     return 'coverage: ' + ' · '.join(f'{r[1]} {r[7]} % long / {r[8]} % short of ${r[6] / 1e9:.2f}B' for r in out) + f' ({len(st)} accounts known)'
 
@@ -171,14 +176,15 @@ def _plain(path, header, rows):
         w = csv.writer(fh); w.writerow(header); w.writerows(rows)
 
 
-def write_levels_and_live(st, stamp, mids, oi, cover):
-    """levels/<date>.csv (heatmap history, appended) + live/positions.csv + live/status.json (overwritten)."""
+def _levels(st, stamp, mids, group, fname):
+    """$ of liquidation prices per price bin (BTC $100, ETH $5, within 20 % of the price); group = None (everyone) or a set of addresses."""
     lv = []
     for c in COINS:
         mid = float(mids.get(c) or 0)
         if not mid: continue
         step = STEP[c]; bins = {}
-        for v in st.values():
+        for a, v in st.items():
+            if group is not None and a not in group: continue
             for x in v:
                 if x[0] != c or not x[4]: continue
                 lp = float(x[4])
@@ -189,8 +195,14 @@ def write_levels_and_live(st, stamp, mids, oi, cover):
                 if trader: e[2 if long_ else 3] += float(x[3])
         lv += [[stamp, c, mid, b, round(e[0]), round(e[1]), round(e[2]), round(e[3])] for b, e in sorted(bins.items())]
     if lv:
-        write(os.path.join(OUT, 'levels', stamp[:10] + '.csv'),
+        write(os.path.join(OUT, fname, stamp[:10] + '.csv'),
               ['time_utc', 'coin', 'mid_px', 'price', 'long_liq_usd', 'short_liq_usd', 'long_liq_usd_traders', 'short_liq_usd_traders'], lv, append=True)
+
+
+def write_levels_and_live(st, stamp, mids, oi, cover, core_set=frozenset()):
+    """levels/<date>.csv (heatmap history, appended) + live/positions.csv + live/status.json (overwritten)."""
+    for group, fname in ((None, 'levels'), (core_set, 'levels_core')):
+        _levels(st, stamp, mids, group, fname)
     pos = [[a] + x[:9] for a, v in st.items() for x in v]
     _plain(os.path.join(LIVE, 'positions.csv'), ['address', 'coin', 'size', 'entry_px', 'value_usd', 'liq_px', 'seen_utc', 'mm_like', 'account_value', 'leverage'],
            [r + [''] * (10 - len(r)) for r in pos])
@@ -229,7 +241,7 @@ def main():
         info[r['ethAddress']] = dict(av=av, mm=vlm_m > 30 * max(av, 1.0), pnl_all=pnl_all, pnl_m=pnl_m, vlm_m=vlm_m)
     smart = set(a for a, _ in sorted(((a, i['pnl_all']) for a, i in info.items() if not i['mm']), key=lambda x: -x[1])[:100])
     core = set(info)
-    plan_note = ''
+    plan_note = ''; big_now = set()
     if PLAN:
         latest = load_state()
         lbm = {r['ethAddress']: r for r in lb}
@@ -249,6 +261,7 @@ def main():
                 info[a] = dict(av=av, mm=vlm_m > 30 * max(av, 1.0), pnl_all=pnl_all, pnl_m=pnl_m, vlm_m=vlm_m)
             else:
                 info[a] = dict(av=0.0, mm=False, pnl_all=0.0, pnl_m=0.0, vlm_m=0.0)
+        big_now = set(big)
         plan_note = f' + {len(big - core)} big + slice {k + 1}/{nsl} ({len(part)} of {len(rest)} rolling)'
 
     acc_path = os.path.join(OUT, 'accounts', day + '.csv')
@@ -282,6 +295,14 @@ def main():
             a['n' + side] += 1; a[side] += val
             if not info[addr]['mm']: a['t' + side] += val
             if addr in smart: a['s' + side] += val
+    t_pos = time.time()
+    if PLAN:   # 1) an account read now that had a position last time but not now -> size-0 row ("closed")
+        old = load_state(); have = {(r[1], r[2]) for r in rows}
+        for addr, st in states:
+            if st is None: continue
+            for x in old.get(addr, []):
+                if x and x[0] in COINS and (addr, x[0]) not in have:
+                    rows.append([stamp, addr, x[0], 0, '', '', 0, '', '', '', int(info[addr]['mm']), int(addr in smart), round(info[addr]['av'])])
     write(os.path.join(OUT, 'positions', day, hhmm + '.csv'),
           ['time_utc', 'address', 'coin', 'size', 'entry_px', 'liquidation_px', 'position_value_usd', 'unrealized_pnl', 'margin', 'leverage',
            'mm_like', 'top100_pnl', 'account_value'], rows)
@@ -305,7 +326,7 @@ def main():
           append=True)
     log = [f'{stamp} UTC positions: {len(info)} accounts (top {N}{plan_note}; {failed} failed), {len(rows)} BTC / ETH positions, {time.time() - t0:.0f} s']
     if PLAN:
-        try: log.append(update_state(states, rows, stamp, mids))
+        try: log.append(update_state(states, rows, stamp, mids, core | big_now))
         except Exception as e: log.append(f'state / coverage failed: {e}')
 
     sel = list(dict.fromkeys(a for _, a in sorted(holders, key=lambda x: -x[0])))[:SEL_MAX]   # biggest trader positions first
@@ -349,6 +370,10 @@ def main():
         except Exception as e: log.append(f'live extras failed: {e}')
     print('\n'.join(log), flush=True)
     write(os.path.join(OUT, 'scanner_log.csv'), ['line'], [[l] for l in log], append=True)
+    if PLAN:   # 2) when this run's data became known (backtests use 'finished_utc', never the start)
+        f = lambda x: dt.datetime.fromtimestamp(x, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        write(os.path.join(OUT, 'runs.csv'), ['time_utc', 'start_utc', 'positions_done_utc', 'finished_utc', 'accounts', 'positions_rows'],
+              [[stamp, f(t0), f(t_pos), f(time.time()), len(info), len(rows)]], append=True)
     try:   # local mode only (not gzip): optional merge + dashboard
         if not GZ:
             sys.path.insert(0, HERE)

@@ -8,10 +8,12 @@ No keys, no trading - it only reads free public endpoints.
 
 | Path | What |
 |---|---|
-| `data/positions/<date>/<HHMM>.csv.gz` | BTC / ETH positions of large Hyperliquid accounts: size, entry, leverage, liquidation price, value, P&L, market-maker flag |
+| `data/positions/<date>/<HHMM>.csv.gz` | BTC / ETH positions of the accounts read in that run: size, entry, leverage, liquidation price, value, P&L, market-maker flag. Size 0 = the account closed that position since its last reading |
 | `data/summary.csv` | one row per coin per run, top 1,500 accounts only: accounts long / short, $ long / short |
 | `data/summary_all.csv` | one row per coin per run, every known account (latest reading of each): $ long / short vs total open interest (coverage %) |
 | `data/levels/<date>.csv` | every run: $ of liquidation prices per price bin (BTC $100, ETH $5, within 20 % of the price) - heatmap history |
+| `data/levels_core/<date>.csv` | the same, but only for the FIXED group read every run (top 1,500 + big accounts) - comparable over time while coverage grows |
+| `data/runs.csv` | one row per scanner run: start, positions done, **finished** - use `finished_utc` as the time the data was known (backtests) |
 | branch `live` | the latest picture only (replaced every run): `positions.csv` (every known position), `orders.csv`, `liquidations.csv` (3 days), `status.json` |
 | `data/feed/<date>/<HHMM>.csv.gz` | addresses that traded BTC / ETH during one listener run (trades, $ traded, first / last seen) |
 | `data/orders/<date>/<HHMM>.csv.gz` | stop-loss / take-profit / reduce-only BTC / ETH orders |
