@@ -1,0 +1,61 @@
+# Hyperliquid position scanner - runs in GitHub Actions every 2 hours.
+# Public data only, no keys. Saves into data/ in this repository. Free plan: ~2,000 minutes a month; this uses ~1,200-1,500.
+name: HL scanner
+run-name: HL scanner (${{ inputs.source || github.event_name }})
+
+# Started by an external clock (workflow_dispatch, every 2 h at :20 UTC):
+# no GitHub schedule - two clocks would run the job
+# twice and go over the free 2,000 minutes a month.
+on:
+  workflow_dispatch:            # "Run workflow" button (source = button) or the external clock
+    inputs:
+      source:
+        description: 'Who started it'
+        required: false
+        default: 'button'
+
+permissions:
+  contents: write               # lets the job save its data files into this repository
+
+concurrency:
+  group: hl-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main          # always the LATEST code + data, even when an old run is re-run
+
+      - name: Collector (Binance 30-day sets + Hyperliquid candles once a day, Hyperliquid snapshot every run)
+        env:
+          POS_OUT: data/collector
+          POS_MONTHLY: '1'      # one small file per month (keeps the git history small)
+          HL_GZIP: '1'          # Deribit options snapshots as .csv.gz (added 20 Nov 2026)
+        run: python3 -I collect.py --cloud || echo "collector failed - scanner still runs"
+
+      - name: Scan Hyperliquid
+        env:
+          HL_GZIP: '1'            # one compressed file per run
+          HL_SLOW_EVERY_H: '24'   # stop-loss / take-profit orders + liquidations once a day (saves minutes)
+          HL_SEL_MAX: '150'
+        run: python3 -I hl_scanner.py --n 1500 --out data
+
+      - name: Save the data
+        run: |
+          git config user.name "hl-scanner"
+          git config user.email "hl-scanner@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "scan $(date -u +%Y-%m-%d_%H%M)"
+          # If another run saved in the meantime: replay this run on top of it; on a clash keep this run's file version
+          # (-X theirs = this run's commit during a rebase), so saving can never get stuck again.
+          for i in 1 2 3; do
+            git pull --rebase -X theirs -q || { git rebase --abort 2>/dev/null; git pull --no-rebase -X ours -q --no-edit; }
+            git push -q && exit 0
+            sleep 10
+          done
+          exit 1
