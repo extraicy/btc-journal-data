@@ -1,0 +1,47 @@
+# Hyperliquid trade-feed listener - listens to every BTC / ETH trade for 5 h 40 min and saves the addresses that traded
+# into data/feed/<date>/<HHMM>.csv.gz. Started every 6 hours by an external clock (workflow_dispatch), so it runs around the clock.
+# The position scanner reads these files to find accounts that are not on the public leaderboard. Public data only, no keys.
+name: HL feed
+run-name: HL feed (${{ inputs.source || github.event_name }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Who started it'
+        required: false
+        default: 'button'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hl-feed
+  cancel-in-progress: false
+
+jobs:
+  listen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Listen to the trade feed (5 h 40 min)
+        run: python3 -I feed_listen.py 20400 --out data
+
+      - name: Save the data
+        if: always()
+        run: |
+          git config user.name "hl-feed"
+          git config user.email "hl-feed@users.noreply.github.com"
+          git add data/feed
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "feed $(date -u +%Y-%m-%d_%H%M)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs -q || { git rebase --abort 2>/dev/null; git pull --no-rebase -X ours -q --no-edit; }
+            git push -q && exit 0
+            sleep 15
+          done
+          exit 1

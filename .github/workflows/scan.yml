@@ -1,11 +1,9 @@
-# Hyperliquid position scanner - runs in GitHub Actions every 2 hours.
-# Public data only, no keys. Saves into data/ in this repository. Free plan: ~2,000 minutes a month; this uses ~1,200-1,500.
+# Hyperliquid position scanner - runs in GitHub Actions every 30 minutes (plan mode: top accounts + big positions every run,
+# everyone else in rolling slices). Public data only, no keys. Saves into data/ in this repository.
 name: HL scanner
 run-name: HL scanner (${{ inputs.source || github.event_name }})
 
-# Started by an external clock (workflow_dispatch, every 2 h at :20 UTC):
-# no GitHub schedule - two clocks would run the job
-# twice and go over the free 2,000 minutes a month.
+# Started by an external clock (workflow_dispatch, every 30 min). No GitHub schedule - two clocks would run the job twice.
 on:
   workflow_dispatch:            # "Run workflow" button (source = button) or the external clock
     inputs:
@@ -24,7 +22,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,12 +35,28 @@ jobs:
           HL_GZIP: '1'          # Deribit options snapshots as .csv.gz (added 20 Nov 2026)
         run: python3 -I collect.py --cloud || echo "collector failed - scanner still runs"
 
+      - name: Restore the scanner state (latest known position of every account - kept in the cache, not in git)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: hl-state-${{ github.run_id }}
+          restore-keys: hl-state-
+
       - name: Scan Hyperliquid
         env:
           HL_GZIP: '1'            # one compressed file per run
-          HL_SLOW_EVERY_H: '24'   # stop-loss / take-profit orders + liquidations once a day (saves minutes)
-          HL_SEL_MAX: '150'
+          HL_PLAN: '1'            # top 1,500 + big positions every run, everyone else in rolling slices
+          HL_SLICE: '4000'
+          HL_SLOW_EVERY_H: '0'    # stop-loss / take-profit orders + liquidations every run
+          HL_SEL_MAX: '100'       # the 100 biggest trader positions
         run: python3 -I hl_scanner.py --n 1500 --out data
+
+      - name: Keep the scanner state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: hl-state-${{ github.run_id }}
 
       - name: Save the data
         run: |
