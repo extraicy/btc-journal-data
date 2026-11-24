@@ -97,3 +97,4 @@ run 2026-11-24 08:30 UTC (snapshot only) | hl_ctx_BTC +1 | hl_ctx_ETH +1 | hl_ct
 run 2026-11-24 09:00 UTC (snapshot only) | hl_ctx_BTC +1 | hl_ctx_ETH +1 | hl_ctx_SOL +1 | hl_ctx_BNB +1 | deribit BTC: 954 options | deribit ETH: 778 options
 run 2026-11-24 09:30 UTC (snapshot only) | hl_ctx_BTC +1 | hl_ctx_ETH +1 | hl_ctx_SOL +1 | hl_ctx_BNB +1 | deribit BTC: 954 options | deribit ETH: 778 options
 run 2026-11-24 10:00 UTC (snapshot only) | hl_ctx_BTC +1 | hl_ctx_ETH +1 | hl_ctx_SOL +1 | hl_ctx_BNB +1 | deribit BTC: 954 options | deribit ETH: 778 options
+run 2026-11-24 10:30 UTC (snapshot only) | hl_ctx_BTC +1 | hl_ctx_ETH +1 | hl_ctx_SOL +1 | hl_ctx_BNB +1 | deribit BTC: 954 options | deribit ETH: 778 options
