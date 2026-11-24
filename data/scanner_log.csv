@@ -396,3 +396,7 @@ coverage: BTC 42.7 % long / 45.2 % short of $2.18B · ETH 46.3 % long / 46.0 % s
 coverage: BTC 44.3 % long / 44.9 % short of $2.17B · ETH 46.0 % long / 46.1 % short of $1.03B (55239 accounts known)
 "orders: 100 trader accounts -> 213 BTC / ETH stop / take-profit / reduce-only orders, 736 s"
 "fills: 100 accounts -> 0 new BTC / ETH liquidation fills, 893 s"
+"2026-11-24 19:30 UTC positions: 5689 accounts (top 1500 + 189 big + slice 2/14 (4000 of 53650 rolling); 0 failed), 2312 BTC / ETH positions, 628 s"
+coverage: BTC 44.0 % long / 45.0 % short of $2.19B · ETH 46.2 % long / 46.1 % short of $1.03B (55423 accounts known)
+"orders: 100 trader accounts -> 212 BTC / ETH stop / take-profit / reduce-only orders, 738 s"
+"fills: 100 accounts -> 0 new BTC / ETH liquidation fills, 919 s"
