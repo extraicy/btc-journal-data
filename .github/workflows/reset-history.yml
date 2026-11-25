@@ -1,0 +1,43 @@
+# MANUAL ONLY - restart the git history of this repository (every file stays exactly as it is now).
+# Why: git keeps every version of every file ever saved, so the repository keeps growing even though the monthly archive
+# (archive.py) moves old raw files into the 'archive-YYYY-MM' releases. Restarting the history drops those old copies.
+# When: only if the repository gets big (over ~2 GB) - about once a year at most. Actions -> "Reset history (manual)" ->
+# Run workflow -> type RESET. It waits for a running scanner, and the listener re-applies its files if it was saving at that moment.
+name: Reset history (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type RESET to restart the history (every file is kept)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hl-scanner             # never at the same time as a scanner run
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    if: inputs.confirm == 'RESET'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: One new commit with today's files, pushed in place of the old history
+        run: |
+          git config user.name "hl-scanner"
+          git config user.email "hl-scanner@users.noreply.github.com"
+          for i in 1 2 3 4 5; do
+            git fetch -q origin main && git checkout -q -f -B main origin/main
+            base=$(git rev-parse HEAD)
+            git checkout -q --orphan fresh
+            git commit -q -m "history restarted $(date -u +%Y-%m-%d) - every file kept; older raw files are in the archive-YYYY-MM releases"
+            if git push -q --force-with-lease=main:$base origin fresh:main; then echo "history restarted"; exit 0; fi
+            git checkout -q -f main; git branch -q -D fresh; sleep 20
+          done
+          exit 1

@@ -7,9 +7,16 @@ At the same time it records EVERY Bybit BTC / ETH liquidation (public "allLiquid
   data/bybit_liq/<date>/<HHMM>.csv.gz   time_ms, time_utc, symbol, long_liquidated, size, bankruptcy_px, value_usd
   (Bybit side "Buy" = a LONG position was liquidated.) If Bybit refuses the connection, the reason is printed and the run carries on.
 
+Every 30 minutes (at :24 and :54 UTC, just before the scanner's :30 / :00 runs) it also writes two small files (added 25 Nov 2026):
+  data/feed_recent/<date>/<HHMM>.csv.gz  address, trades, usd_traded, last_trade_utc - everyone who traded >= $10k of BTC / ETH in
+                                         those 30 minutes (99 % of the volume). The scanner re-reads these accounts on its next run.
+  data/big_trades/<date>/<HHMM>.csv.gz   every taker order of >= $100k (all fills of one order added up): time, coin, side (B = the
+                                         taker bought), taker address, $, size, average price, fills, makers
+  (HHMM = when the slice was written.) With FEED_PUSH=1 (the cloud job) each slice is committed + pushed right away.
+
 Usage:  python3 -I feed_listen.py <seconds> [--out data]
 """
-import socket, ssl, os, sys, json, base64, struct, time, csv, gzip, threading, datetime as dt
+import socket, ssl, os, sys, json, base64, struct, time, csv, gzip, threading, subprocess, datetime as dt
 
 HOST = 'api.hyperliquid.xyz'; COINS = ('BTC', 'ETH')
 args = sys.argv[1:]
@@ -60,6 +67,62 @@ def frame(s):
 seen = {}   # address -> [trades, usd, first_ms, last_ms]
 trades = reconnects = 0
 liqs = []; bybit_note = []
+SLICE_MIN_USD = 10_000      # feed_recent: traded at least this much in the slice
+BIG_ORDER_USD = 100_000     # big_trades: taker orders of at least this much
+recent = {}                 # this slice: address -> [trades, usd, last_ms]
+orders = {}                 # this slice: tx hash -> [coin, side, taker, usd, size, first_ms, last_ms, fills, makers (set)]
+pub_lock = threading.Lock(); pub_log = []
+
+
+def next_slice_time(now):
+    """The next :24 or :54 UTC (epoch seconds)."""
+    t = dt.datetime.fromtimestamp(now, dt.timezone.utc).replace(second=0, microsecond=0)
+    for k in range(1, 62):
+        x = t + dt.timedelta(minutes=k)
+        if x.minute in (24, 54): return x.timestamp()
+    return now + 1800
+
+
+def git(*a):
+    return subprocess.run(['git', *a], capture_output=True, text=True, timeout=180)
+
+
+def push(paths, label):
+    """Commit + push this slice's files (cloud job only). Runs in its own thread, so the feed keeps being read."""
+    if os.environ.get('FEED_PUSH') != '1': return
+    with pub_lock:
+        try:
+            git('add', *paths)
+            if git('diff', '--cached', '--quiet').returncode == 0: return
+            git('commit', '-q', '-m', f'feed slice {label}')
+            for i in range(5):
+                if git('pull', '--rebase', '-q').returncode != 0: git('rebase', '--abort')
+                if git('push', '-q').returncode == 0: pub_log.append(f'{label} pushed'); return
+                time.sleep(10 * (i + 1))
+            pub_log.append(f'{label} push failed (kept for the final save)')
+        except Exception as e:  # noqa: BLE001
+            pub_log.append(f'{label} push failed: {e}')
+
+
+def write_slice():
+    """feed_recent + big_trades files for the slice that just ended -> (their paths, a label)."""
+    global recent, orders
+    rec, ords = recent, orders; recent, orders = {}, {}
+    now = dt.datetime.now(dt.timezone.utc); d = now.strftime('%Y-%m-%d'); hm = now.strftime('%H%M')
+    fmt = lambda ms: dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime('%Y-%m-%d %H:%M')
+    fmts = lambda ms: dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    rows = [[a, n, round(u), fmt(l)] for a, (n, u, l) in sorted(rec.items(), key=lambda x: -x[1][1]) if u >= SLICE_MIN_USD]
+    big = [[o[5], fmts(o[5]), o[0], o[1], o[2], round(o[3]), round(o[4], 6), round(o[3] / o[4], 2) if o[4] else '', o[7], len(o[8])]
+           for o in sorted(ords.values(), key=lambda x: x[5]) if o[3] >= BIG_ORDER_USD]
+    paths = []
+    for sub, head, data in (('feed_recent', ['address', 'trades', 'usd_traded', 'last_trade_utc'], rows),
+                            ('big_trades', ['time_ms', 'time_utc', 'coin', 'side', 'taker', 'usd', 'size', 'avg_px', 'fills', 'makers'], big)):
+        if not data: continue
+        p = os.path.join(OUT, sub, d, hm + '.csv.gz'); os.makedirs(os.path.dirname(p), exist_ok=True)
+        with gzip.open(p + '.tmp', 'wt', newline='', encoding='utf-8') as f:
+            w = csv.writer(f); w.writerow(head); w.writerows(data)
+        os.replace(p + '.tmp', p); paths.append(p)
+    return paths, f'{d} {hm} ({len(rows)} traders, {len(big)} big orders)'
 
 
 def save():
@@ -112,7 +175,7 @@ def bybit():
             print('bybit reconnect:', msg, flush=True); time.sleep(5)
 
 
-end = time.time() + DUR; last_save = time.time()
+end = time.time() + DUR; last_save = time.time(); next_pub = next_slice_time(time.time())
 threading.Thread(target=bybit, daemon=True).start()
 while time.time() < end:
     try:
@@ -122,6 +185,9 @@ while time.time() < end:
         while time.time() < end:
             if time.time() - last_ping > 45: send(s, {'method': 'ping'}); last_ping = time.time()
             if time.time() - last_save > 1800: save(); save_bybit(); last_save = time.time()
+            if time.time() >= next_pub:
+                ps, label = write_slice(); next_pub = next_slice_time(time.time() + 60)
+                if ps: threading.Thread(target=push, args=(ps, label), daemon=True).start()
             try: op, d = frame(s)
             except socket.timeout: continue
             if op == 8: raise ConnectionError('server close')
@@ -133,10 +199,21 @@ while time.time() < end:
             if m.get('channel') != 'trades': continue
             for t in m['data']:
                 trades += 1; usd = float(t['px']) * float(t['sz']); ms = int(t['time'])
-                for u in t.get('users', []):
-                    e = seen.setdefault(u.lower(), [0, 0.0, ms, ms]); e[0] += 1; e[1] += usd; e[3] = ms
+                us = [u.lower() for u in t.get('users', [])]
+                for u in us:
+                    e = seen.setdefault(u, [0, 0.0, ms, ms]); e[0] += 1; e[1] += usd; e[3] = ms
+                    r = recent.setdefault(u, [0, 0.0, ms]); r[0] += 1; r[1] += usd; r[2] = max(r[2], ms)
+                if len(us) == 2:   # users = [buyer, seller]; side B = the taker bought, so the taker is the buyer
+                    taker, maker = (us[0], us[1]) if t.get('side') == 'B' else (us[1], us[0])
+                    h = t.get('hash') or ''   # one taker order = one transaction hash; system trades (liquidations...) have an all-zero hash
+                    key = (h, t['coin'], taker) if h.replace('0x', '').strip('0') else ('tid', t.get('tid'))
+                    o = orders.setdefault(key, [t['coin'], t.get('side'), taker, 0.0, 0.0, ms, ms, 0, set()])
+                    o[3] += usd; o[4] += float(t['sz']); o[6] = max(o[6], ms); o[7] += 1; o[8].add(maker)
     except Exception as e:
         reconnects += 1; print('reconnect:', str(e)[:120], flush=True); time.sleep(3)
 save(); save_bybit()
+write_slice()          # the last part-slice: saved by the job's final save step
+with pub_lock: pass    # let a push that is still running finish
 print(f'feed: {trades} trades, {len(seen)} addresses, {reconnects} reconnects -> {PATH}', flush=True)
+print('slices: ' + ('; '.join(pub_log[-14:]) or 'none pushed (local run)'), flush=True)
 print(f'bybit liquidations: {len(liqs)} ({"; ".join(bybit_note) or "never connected"}) -> {BPATH if liqs else "nothing saved"}', flush=True)

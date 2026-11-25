@@ -1,5 +1,5 @@
-# Hyperliquid position scanner - runs in GitHub Actions every 30 minutes (plan mode: top accounts + big positions every run,
-# everyone else in rolling slices). Public data only, no keys. Saves into data/ in this repository.
+# Hyperliquid position scanner - runs in GitHub Actions every 30 minutes (plan mode: top accounts + big positions + accounts that just
+# traded every run, everyone else by how long they've been unread). Public data only, no keys. Saves into data/ in this repository.
 name: HL scanner
 run-name: HL scanner (${{ inputs.source || github.event_name }})
 
@@ -13,7 +13,7 @@ on:
         default: 'button'
 
 permissions:
-  contents: write               # lets the job save its data files into this repository
+  contents: write               # lets the job save its data files into this repository (and the monthly archive releases)
 
 concurrency:
   group: hl-scanner
@@ -45,13 +45,14 @@ jobs:
       - name: Scan Hyperliquid
         env:
           HL_GZIP: '1'            # one compressed file per run
-          HL_PLAN: '1'            # top 1,500 + big positions every run, everyone else in rolling slices
+          HL_PLAN: '1'            # top 1,500 + big positions + accounts that just traded every run, the rest by how long unread
           HL_SLICE: '4000'
-          HL_SLOW_EVERY_H: '0'    # stop-loss / take-profit orders + liquidations every run
+          HL_SLOW_EVERY_H: '0'    # stop-loss / take-profit orders + liquidations + whale fills every run
           HL_SEL_MAX: '100'       # the 100 biggest trader positions
         run: python3 -I hl_scanner.py --n 1500 --out data
 
       - name: Publish the latest picture for the website (branch 'live' - replaced every run, so it never grows)
+        continue-on-error: true   # a failed website push must never stop the data being saved (it did on 24 Nov 2026 22:30)
         run: |
           [ -f live/status.json ] || { echo "no live files"; exit 0; }
           cd live
@@ -69,7 +70,14 @@ jobs:
           path: state
           key: hl-state-${{ github.run_id }}
 
+      - name: Monthly archive (from the 2nd - last month's raw files go to the release 'archive-YYYY-MM', then leave the repo)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I archive.py --data data
+
       - name: Save the data
+        if: always()              # whatever the steps above did, never lose what was read
         run: |
           git config user.name "hl-scanner"
           git config user.email "hl-scanner@users.noreply.github.com"

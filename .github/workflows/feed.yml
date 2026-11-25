@@ -1,6 +1,7 @@
 # Hyperliquid trade-feed listener - listens to every BTC / ETH trade for 5 h 40 min and saves the addresses that traded
 # into data/feed/<date>/<HHMM>.csv.gz. Started every 6 hours by an external clock (workflow_dispatch), so it runs around the clock.
-# The position scanner reads these files to find accounts that are not on the public leaderboard. Public data only, no keys.
+# Every 30 min (:24 / :54) it also pushes who traded >= $10k (data/feed_recent/) + every taker order >= $100k (data/big_trades/),
+# so the scanner's next run re-reads exactly the accounts that just traded. Public data only, no keys.
 name: HL feed
 run-name: HL feed (${{ inputs.source || github.event_name }})
 
@@ -28,16 +29,21 @@ jobs:
         with:
           ref: main
 
-      - name: Listen to the trade feed + Bybit liquidations (5 h 40 min)
-        run: python3 -I feed_listen.py 20400 --out data
+      - name: Listen to the trade feed + Bybit liquidations (5 h 40 min; trader slices pushed every 30 min)
+        env:
+          FEED_PUSH: '1'
+        run: |
+          git config user.name "hl-feed"
+          git config user.email "hl-feed@users.noreply.github.com"
+          touch "$RUNNER_TEMP/started"
+          python3 -I feed_listen.py 20400 --out data
 
       - name: Save the data
         if: always()
         run: |
           git config user.name "hl-feed"
           git config user.email "hl-feed@users.noreply.github.com"
-          git add data/feed
-          git add data/bybit_liq 2>/dev/null || true
+          for p in data/feed data/feed_recent data/big_trades data/bybit_liq; do [ -e "$p" ] && git add "$p"; done
           if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
           git commit -q -m "feed $(date -u +%Y-%m-%d_%H%M)"
           for i in 1 2 3 4 5; do
@@ -45,4 +51,8 @@ jobs:
             git push -q && exit 0
             sleep 15
           done
+          # last resort (e.g. the history was restarted meanwhile): only this run's new files, on top of the current main
+          git fetch -q origin main && git reset -q --mixed origin/main
+          find data/feed data/feed_recent data/big_trades data/bybit_liq -type f -newer "$RUNNER_TEMP/started" -print0 2>/dev/null | xargs -0 -r git add
+          git commit -q -m "feed $(date -u +%Y-%m-%d_%H%M) (re-applied)" && git push -q && exit 0
           exit 1

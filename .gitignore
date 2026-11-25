@@ -3,3 +3,4 @@ __pycache__/
 state/
 *.tmp
 live/
+archive_tmp/
