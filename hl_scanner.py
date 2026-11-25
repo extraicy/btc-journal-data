@@ -414,6 +414,18 @@ def write_live_recent():
         _plain(os.path.join(LIVE, name), head, rows)
 
 
+def load_prev_sel():
+    """Last run's whale-fill accounts (the 100 biggest trader positions then)."""
+    try:
+        with open(os.path.join(STATE, 'fill_accounts.txt'), encoding='utf-8') as fh: return [l.strip() for l in fh if l.strip()]
+    except OSError: return []
+
+
+def save_prev_sel(sel):
+    os.makedirs(STATE, exist_ok=True)
+    with open(os.path.join(STATE, 'fill_accounts.txt'), 'w', encoding='utf-8', newline='\n') as fh: fh.write('\n'.join(sel) + '\n')
+
+
 def load_fill_keys():
     p = os.path.join(STATE, 'fill_keys.csv'); keys = {}
     if os.path.exists(p):
@@ -546,6 +558,10 @@ def main():
     log = [f'{stamp} UTC positions: {len(info)} accounts (top {N}{plan_note}; {failed} failed), {len(rows)} BTC / ETH positions, {time.time() - t0:.0f} s']
 
     sel = list(dict.fromkeys(a for _, a in sorted(holders, key=lambda x: -x[0])))[:SEL_MAX]   # biggest trader positions first
+    # whale fills also follow last run's list (owner's go 25 Nov 2026): a whale that closed its whole position is no longer among the
+    # biggest holders - without this, its closing trades would be missed
+    in_sel = set(sel)
+    fsel = sel + [a for a in load_prev_sel() if a not in in_sel] if PLAN else sel
     orows_live = []
     if DO_ORDERS and sel:
         def orders(addr):
@@ -573,7 +589,7 @@ def main():
                     start = max(int(f['time']) for f in page) + 1
                 return addr, ff
             except Exception: return addr, None
-        with ThreadPoolExecutor(3) as ex: res = list(ex.map(fills, sel))
+        with ThreadPoolExecutor(3) as ex: res = list(ex.map(fills, fsel))
         lp = os.path.join(OUT, 'liquidations.csv'); seen = set()
         if os.path.exists(lp):
             with open(lp, encoding='utf-8') as fh: seen = {r[0] for r in csv.reader(fh)}
@@ -589,7 +605,7 @@ def main():
                     new.append([key, f['time'], dt.datetime.fromtimestamp(f['time'] / 1000, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), f['coin'],
                                 q.get('liquidatedUser'), q.get('markPx'), q.get('method'), f.get('px'), f.get('sz'), f.get('side'), f.get('dir'), long_liq])
         write(lp, ['key', 'time_ms', 'time_utc', 'coin', 'liquidated_user', 'mark_px', 'method', 'fill_px', 'fill_size', 'fill_side', 'fill_dir', 'long_liquidated'], new, append=True)
-        log.append(f'fills: {len(sel)} accounts -> {len(new)} new BTC / ETH liquidation fills, {time.time() - t0:.0f} s')
+        log.append(f'fills: {len(fsel)} accounts ({len(fsel) - len(sel)} only on last run\'s list) -> {len(new)} new BTC / ETH liquidation fills, {time.time() - t0:.0f} s')
         if PLAN:   # whale fills: every BTC / ETH fill of these accounts since the last run, grouped per account + coin + direction
             keys = load_fill_keys(); grp = {}
             fmt = lambda t: dt.datetime.fromtimestamp(t / 1000, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -609,10 +625,11 @@ def main():
                         e['lq'] += 1
                         if (q.get('liquidatedUser') or '').lower() == addr.lower(): e['olq'] += 1
             frows = [[stamp, a, c, d, e['n'], round(e['sz'], 6), round(e['usd'] / e['sz'], 2) if e['sz'] else '', fmt(e['t0']), fmt(e['t1']), round(e['usd']),
-                      round(e['pnl'], 2), round(e['fee'], 4), round(100 * e['tk'] / e['usd'], 1) if e['usd'] else '', e['lq'], int(info[a]['mm']), int(a in smart), e['olq']]
+                      round(e['pnl'], 2), round(e['fee'], 4), round(100 * e['tk'] / e['usd'], 1) if e['usd'] else '', e['lq'], int(info.get(a, {}).get('mm', 0)), int(a in smart), e['olq']]
                      for (a, c, d), e in sorted(grp.items(), key=lambda x: x[1]['t0'])]
             if frows: write(os.path.join(OUT, 'fills', day, hhmm + '.csv'), FILL_COLS, frows)
             save_fill_keys(keys)
+            save_prev_sel(sel)
             log.append(f'whale fills: {sum(e["n"] for e in grp.values())} new BTC / ETH fills of {len({a for a, _, _ in grp})} accounts -> {len(frows)} rows')
     if DO_SLOW and sel:
         with open(os.path.join(OUT, 'last_slow.txt'), 'w') as fh: fh.write(str(time.time()))
