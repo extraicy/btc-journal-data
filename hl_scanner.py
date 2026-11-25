@@ -81,7 +81,7 @@ HOT_USD = 250_000       # traded >= this since the last reading -> read next run
 HOT_MAX = 1000
 HOLDER_WEIGHT = 3       # an account holding a position becomes overdue 3x faster than an empty one
 FILL_COLS = ['time_utc', 'address', 'coin', 'dir', 'fills', 'size', 'avg_px', 'first_fill_utc', 'last_fill_utc', 'usd', 'closed_pnl', 'fee',
-             'taker_pct', 'liquidation_fills', 'mm_like', 'top100_pnl']
+             'taker_pct', 'liquidation_fills', 'mm_like', 'top100_pnl', 'own_liquidation_fills']
 STATE_COLS = ['address', 'coin', 'size', 'entry_px', 'value_usd', 'liq_px', 'seen_utc', 'mm_like', 'account_value', 'leverage', 'top100_pnl']
 
 
@@ -376,6 +376,44 @@ def write_live_extras(orows):
         if head: _plain(os.path.join(LIVE, 'liquidations.csv'), head, keep)
 
 
+def _recent_files(sub, hours):
+    """Per-run files of data/<sub>/<date>/<HHMM>.csv[.gz] from the last `hours` hours, oldest first."""
+    cut = (NOW - dt.timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M')
+    return sorted((f for f in glob.glob(os.path.join(OUT, sub, '*', '*.csv*')) if _stamp_of(f) >= cut), key=_stamp_of)
+
+
+def write_live_recent():
+    """Small 'latest' files for the website's intelligence tabs (live branch - replaced every run, so they never grow):
+    intel_recent.csv (7 days of intelligence.csv), changes_recent.csv (24 h: changes >= $100k + every liquidation),
+    fills_recent.csv (24 h of whale fills), big_trades_recent.csv (24 h of taker orders >= $100k from the listener)."""
+    ip = os.path.join(OUT, 'intelligence.csv')
+    if os.path.exists(ip):
+        cut = (NOW - dt.timedelta(days=7)).strftime('%Y-%m-%d %H:%M')
+        with open(ip, 'rb') as fh:                                   # only the end of the file (7 days ~ 0.5 MB)
+            head = fh.readline().decode('utf-8').strip().split(',')
+            fh.seek(0, 2); size = fh.tell(); fh.seek(max(0, size - 3_000_000))
+            lines = fh.read().decode('utf-8', 'replace').splitlines()[1:]
+        _plain(os.path.join(LIVE, 'intel_recent.csv'), head, [r for r in csv.reader(lines) if r and r[0][:2] == '20' and r[0] >= cut])
+    def big_change(d):   # market makers churn inventory all day -> only their big moves; liquidations from $50k
+        usd = abs(I.num(d.get('usd_change')))
+        return usd >= (500_000 if d.get('mm_like') == '1' else 100_000) or (bool(d.get('liquidation')) and usd >= 50_000)
+    change_cols = ['time_utc', 'since_utc', 'address', 'coin', 'event', 'liquidation', 'size_before', 'size_after', 'usd_change', 'mid_px',
+                   'entry_after', 'value_after', 'whale', 'top_trader', 'mm_like', 'every_run']
+    for sub, name, keep, cols in (('changes', 'changes_recent.csv', big_change, change_cols), ('fills', 'fills_recent.csv', None, None),
+                                  ('big_trades', 'big_trades_recent.csv', None, None)):
+        data = []
+        for f in _recent_files(sub, 24):
+            try:
+                with (gzip.open(f, 'rt', newline='', encoding='utf-8') if f.endswith('.gz') else open(f, newline='', encoding='utf-8')) as fh:
+                    x = list(csv.reader(fh))
+            except Exception: continue
+            if len(x) >= 2: data.append(x)
+        if not data: continue
+        head = cols or data[-1][0]   # the newest file's columns (columns get added over time - older files leave the new ones empty)
+        rows = [[d.get(c, '') for c in head] for x in data for d in (dict(zip(x[0], r)) for r in x[1:] if r) if keep is None or keep(d)]
+        _plain(os.path.join(LIVE, name), head, rows)
+
+
 def load_fill_keys():
     p = os.path.join(STATE, 'fill_keys.csv'); keys = {}
     if os.path.exists(p):
@@ -561,14 +599,17 @@ def main():
                     key = f"{f.get('hash')}-{f.get('tid')}"
                     if key in keys: continue
                     keys[key] = int(f['time'])
-                    e = grp.setdefault((addr, f['coin'], f.get('dir') or ''), dict(n=0, sz=0.0, usd=0.0, t0=f['time'], t1=f['time'], pnl=0.0, fee=0.0, tk=0.0, lq=0))
+                    e = grp.setdefault((addr, f['coin'], f.get('dir') or ''), dict(n=0, sz=0.0, usd=0.0, t0=f['time'], t1=f['time'], pnl=0.0, fee=0.0, tk=0.0, lq=0, olq=0))
                     px, sz = float(f['px']), float(f['sz'])
                     e['n'] += 1; e['sz'] += sz; e['usd'] += px * sz; e['t0'] = min(e['t0'], f['time']); e['t1'] = max(e['t1'], f['time'])
                     e['pnl'] += float(f.get('closedPnl') or 0); e['fee'] += float(f.get('fee') or 0)
                     if f.get('crossed'): e['tk'] += px * sz
-                    if f.get('liquidation'): e['lq'] += 1
+                    q = f.get('liquidation')
+                    if q:   # lq = any fill of a liquidation (also when this account was the other side), olq = this account itself was liquidated
+                        e['lq'] += 1
+                        if (q.get('liquidatedUser') or '').lower() == addr.lower(): e['olq'] += 1
             frows = [[stamp, a, c, d, e['n'], round(e['sz'], 6), round(e['usd'] / e['sz'], 2) if e['sz'] else '', fmt(e['t0']), fmt(e['t1']), round(e['usd']),
-                      round(e['pnl'], 2), round(e['fee'], 4), round(100 * e['tk'] / e['usd'], 1) if e['usd'] else '', e['lq'], int(info[a]['mm']), int(a in smart)]
+                      round(e['pnl'], 2), round(e['fee'], 4), round(100 * e['tk'] / e['usd'], 1) if e['usd'] else '', e['lq'], int(info[a]['mm']), int(a in smart), e['olq']]
                      for (a, c, d), e in sorted(grp.items(), key=lambda x: x[1]['t0'])]
             if frows: write(os.path.join(OUT, 'fills', day, hhmm + '.csv'), FILL_COLS, frows)
             save_fill_keys(keys)
@@ -580,6 +621,8 @@ def main():
         except Exception as e: log.append(f'state / coverage failed: {e}')
         try: write_live_extras(orows_live)
         except Exception as e: log.append(f'live extras failed: {e}')
+        try: write_live_recent()
+        except Exception as e: log.append(f'live recent files failed: {e}')
     print('\n'.join(log), flush=True)
     write(os.path.join(OUT, 'scanner_log.csv'), ['line'], [[l] for l in log], append=True)
     if PLAN:   # 2) when this run's data became known (backtests use 'finished_utc', never the start)

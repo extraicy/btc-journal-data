@@ -20,14 +20,14 @@ vs the reported change, ratio 1.01), so one side = openInterest / 2. Shares in `
 |---|---|
 | `data/intelligence.csv` | **one row per coin per run** - see the column list below. Back-filled from 22 Nov 2026 22:22 (no order book before 25 Nov) |
 | `data/changes/<date>/<HHMM>.csv.gz` | every position change >= $10k (+ every liquidation) seen between two readings of an account - see below |
-| `data/fills/<date>/<HHMM>.csv.gz` | "whale fills": all BTC / ETH fills of the 100 biggest trader positions since the last run, per account + coin + direction: fills, size, average price, first / last fill time (seconds), $, closed P&L, fee, taker %, liquidation fills |
+| `data/fills/<date>/<HHMM>.csv.gz` | "whale fills": all BTC / ETH fills of the 100 biggest trader positions since the last run, per account + coin + direction: fills, size, average price, first / last fill time (seconds), $, closed P&L, fee, taker %, liquidation fills (`liquidation_fills` = fills of any liquidation, also another account's that this one traded against; `own_liquidation_fills` = this account itself was liquidated, since 25 Nov 2026) |
 | `data/positions/<date>/<HHMM>.csv.gz` | BTC / ETH positions of the accounts read in that run: size, entry, leverage, liquidation price, value, P&L, market-maker flag, top-100 flag. Size 0 = the account closed that position since its last reading |
 | `data/summary.csv` | one row per coin per run, top 1,500 accounts only: accounts long / short, $ long / short |
 | `data/summary_all.csv` | one row per coin per run, every known account (latest reading of each): $ long / short, Hyperliquid's open interest (`total_oi_usd`, both sides) + one side, coverage % of one side, % read within 1 h / 6 h |
 | `data/levels/<date>.csv` | every run: $ of liquidation prices per price bin (BTC $100, ETH $5, within 20 % of the price) - heatmap history |
 | `data/levels_core/<date>.csv` | the same, but only for the FIXED group read every run (top 1,500 + big accounts) - comparable over time while coverage grows |
 | `data/runs.csv` | one row per scanner run: start, positions done, **finished** |
-| branch `live` | the latest picture only (replaced every run): `positions.csv` (every known position), `orders.csv`, `liquidations.csv` (3 days), `status.json` |
+| branch `live` | the latest picture only (replaced every run): `positions.csv` (every known position), `orders.csv`, `liquidations.csv` (3 days), `status.json`; for the website's intelligence tabs (since 25 Nov 2026): `intel_recent.csv` (last 7 days of `intelligence.csv`), `changes_recent.csv` (24 h of `changes/`: changes >= $100k, market makers >= $500k, liquidations >= $50k; fewer columns), `fills_recent.csv` (24 h of `fills/`), `big_trades_recent.csv` (24 h of `big_trades/`) |
 | `data/feed/<date>/<HHMM>.csv.gz` | addresses that traded BTC / ETH during one listener run (trades, $ traded, first / last seen) |
 | `data/feed_recent/<date>/<HHMM>.csv.gz` | every 30 min: who traded >= $10k of BTC / ETH in those 30 minutes (trades, $, last trade) |
 | `data/big_trades/<date>/<HHMM>.csv.gz` | every 30 min: every taker order >= $100k (all fills of one order added up): time, coin, side (B = taker bought), taker, $, size, average price, fills, makers |
