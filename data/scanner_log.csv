@@ -511,3 +511,8 @@ whale fills: 3032 new BTC / ETH fills of 19 accounts -> 30 rows
 "fills: 100 accounts -> 29 new BTC / ETH liquidation fills, 918 s"
 whale fills: 2163 new BTC / ETH fills of 17 accounts -> 28 rows
 "coverage (one side of open interest): BTC 90.6 % of longs / 93.2 % of shorts of $1.04B each (82.2 / 87.7 % read within 1 h) · ETH 93.4 % of longs / 92.8 % of shorts of $0.51B each (86.8 / 87.9 % read within 1 h) (61507 accounts known) | changes: 1266 (344 since the previous run, 491 of >= $10k saved), 25 confirmed + 60 probable liquidations | book: ok"
+"2026-11-25 09:00 UTC positions: 5816 accounts (top 1500 + 206 big + 110 hot (traded >= $250k) + 4000 rolling (438 traded since their last reading) of 58861; next in line unread for 3.5 h; 0 failed), 2614 BTC / ETH positions, 637 s"
+"orders: 100 trader accounts -> 205 BTC / ETH stop / take-profit / reduce-only orders, 745 s"
+"fills: 100 accounts -> 0 new BTC / ETH liquidation fills, 932 s"
+whale fills: 2871 new BTC / ETH fills of 15 accounts -> 27 rows
+"coverage (one side of open interest): BTC 90.3 % of longs / 92.7 % of shorts of $1.06B each (80.7 / 85.8 % read within 1 h) · ETH 93.8 % of longs / 93.0 % of shorts of $0.51B each (85.6 / 86.9 % read within 1 h) (61539 accounts known) | changes: 1030 (337 since the previous run, 510 of >= $10k saved), 7 confirmed + 28 probable liquidations | book: ok"
