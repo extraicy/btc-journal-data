@@ -6,6 +6,7 @@ Records (CSV):
   binance_ls_1h_<C>        long / short account ratio, 1H               (30 days)
   binance_topls_1h_<C>     top traders' long / short position ratio, 1H (30 days)
   binance_taker_1h_<C>     taker buy / sell volume, 1H                  (30 days)
+  etf_flows_btc            US spot Bitcoin ETF net flows per day, US$ m (Farside; recorded from 25 Nov 2026)
   hl_candles_1h_<C>        Hyperliquid 1H candles                       (Hyperliquid keeps only ~5000 candles)
   hl_ctx_<C>               Hyperliquid snapshot NOW: funding, open interest, premium, mark / oracle price, day volume
                            (no history exists at all - only the hours this ran)
@@ -70,11 +71,40 @@ def deribit_options():
     return deribit.run()
 
 
+def etf_flows():
+    """US spot Bitcoin ETF net flows, US$ millions per trading day (owner's go 25 Nov 2026 ~23:35 UTC, market-condition research).
+    Farside's open page (farside.co.uk/btc/) shows only the last ~3 weeks and the full-history page is behind a bot check,
+    so we record it ourselves from now on (merge = newer values win, so late fund reports overwrite the first reading).
+    Row time = that day 00:00 UTC; days not reported yet ("-") are skipped."""
+    import html as _h, re as _re, urllib.request as _u, datetime as _dt
+    req = _u.Request('https://farside.co.uk/btc/', headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    page = _u.urlopen(req, timeout=30).read().decode('utf-8', 'replace')
+    cells = lambda r: [_h.unescape(_re.sub(r'<[^>]+>', '', c)).strip() for c in _re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', r, _re.S)]
+    rows = [cells(r) for r in _re.findall(r'<tr[^>]*>(.*?)</tr>', page, _re.S)]
+    head = next((r for r in rows if 'IBIT' in r), None)
+    if not head: raise RuntimeError('farside: table header not found')
+    def val(s):
+        s = s.replace(',', '').strip()
+        if s in ('', '-'): return None
+        return -float(s[1:-1]) if s.startswith('(') else float(s)
+    out = []
+    for r in rows:
+        if not _re.match(r'\d{2} \w{3} \d{4}$', r[0] if r else ''): continue
+        total = val(r[-1])
+        if total is None: continue
+        t = int(_dt.datetime.strptime(r[0], '%d %b %Y').replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
+        funds = ';'.join(f'{n}:{val(v)}' for n, v in zip(head[1:-1], r[1:-1]) if n and val(v) is not None)
+        out.append((t, [total, funds]))
+    a, n = P.merge('etf_flows_btc', ['total_usd_m', 'funds_usd_m'], out)
+    return [f'etf_flows_btc +{a} ({n} days)']
+
+
 def run(coins=COINS, snapshot=True):
     lines = [f'run {P.iso(P.now_ms())} UTC']
     jobs = [lambda: hl_snapshot(coins), deribit_options] if snapshot else []
     for c in coins:
         jobs += [lambda c=c: binance_30d(c), lambda c=c: [hl_candles(c)]]
+    jobs.append(etf_flows)
     for j in jobs:
         try:
             lines += j()
