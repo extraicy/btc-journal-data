@@ -621,6 +621,20 @@ def publish_live(stamp, push=True):
         h, rr = recent_daily(sub)
         if h: S._plain(os.path.join(L, name), h, rr)
     window_files(next_boundary_stamp(), False)
+    # Bybit liquidations of the last 24 h (every one, from the public stream; owner's go 26 Nov 2026 18:50 UTC): saved files + this run's
+    bl, cut = {}, (time.time() - 86400) * 1000
+    for f in glob.glob(os.path.join(OUT, 'bybit_liq', '*', '*.csv.gz')):
+        if os.path.basename(os.path.dirname(f)) < utc(time.time() - 2 * 86400, '%Y-%m-%d'): continue
+        try:
+            with gzip.open(f, 'rt', newline='', encoding='utf-8') as fh:
+                for r in list(csv.reader(fh))[1:]:
+                    if r and float(r[0]) >= cut: bl[(r[0], r[2], r[4])] = r
+        except Exception: pass
+    with LOCK: mine = list(feed['liqs'])
+    for r in mine:
+        if r[0] >= cut: bl[(str(r[0]), r[2], str(r[4]))] = r
+    S._plain(os.path.join(L, 'bybit_liq.csv'), ['time_ms', 'time_utc', 'symbol', 'long_liquidated', 'size', 'bankruptcy_px', 'value_usd'],
+             sorted(bl.values(), key=lambda r: float(r[0])))
     with LOCK: ords = list(feed['orders'].values())   # the current half hour's big taker orders (big_trades_recent only has finished slices)
     S._plain(os.path.join(L, 'big_trades_now.csv'), ['time_ms', 'time_utc', 'coin', 'side', 'taker', 'usd', 'size', 'avg_px', 'fills', 'makers'],
              [[o[5], utc(o[5] / 1000, '%Y-%m-%d %H:%M:%S'), o[0], o[1], o[2], round(o[3]), round(o[4], 6), round(o[3] / o[4], 2) if o[4] else '', o[7], len(o[8])]
