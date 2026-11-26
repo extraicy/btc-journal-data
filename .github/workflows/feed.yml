@@ -1,9 +1,11 @@
-# Hyperliquid trade-feed listener - listens to every BTC / ETH trade for 5 h 40 min and saves the addresses that traded
-# into data/feed/<date>/<HHMM>.csv.gz. Started every 6 hours by an external clock (workflow_dispatch), so it runs around the clock.
-# Every 30 min (:24 / :54) it also pushes who traded >= $10k (data/feed_recent/) + every taker order >= $100k (data/big_trades/),
-# so the scanner's next run re-reads exactly the accounts that just traded. Public data only, no keys.
-name: HL feed
-run-name: HL feed (${{ inputs.source || github.event_name }})
+# Hyperliquid LIVE job (26 Nov 2026) - trade feed + position scanner + 1-minute market recorder in ONE always-on process (hl_live.py).
+# Each run lasts ~5-5.6 h and ends right after a :00 / :30 window is saved. Started by the external clock every 30 minutes: while a run is
+# going, the newest start waits (older waiting ones are replaced - they show as "cancelled", that is normal), so the next run begins the
+# moment the previous one ends (~2 min gap). Public data only; the GitHub token is only used to push data/ + the 'live' branch.
+# Backup: scan.yml (the old 30-minute scanner) still starts every 30 min, but only scans when this job's live picture is > 20 min old.
+# (Until 26 Nov 2026 this file ran feed_listen.py alone - that file is kept but no longer used.)
+name: HL live
+run-name: HL live (${{ inputs.source || github.event_name }})
 
 on:
   workflow_dispatch:
@@ -14,14 +16,14 @@ on:
         default: 'button'
 
 permissions:
-  contents: write
+  contents: write               # push data/ + the 'live' branch + the monthly archive releases
 
 concurrency:
   group: hl-feed
   cancel-in-progress: false
 
 jobs:
-  listen:
+  live:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
@@ -29,30 +31,47 @@ jobs:
         with:
           ref: main
 
-      - name: Listen to the trade feed + Bybit liquidations (5 h 40 min; trader slices pushed every 30 min)
+      - name: Restore the scanner state (latest known position of every account - kept in the cache, not in git)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: hl-state-${{ github.run_id }}
+          restore-keys: hl-state-
+
+      - name: Monthly archive (from the 2nd - last month's raw files go to the release 'archive-YYYY-MM', then leave the repo)
+        continue-on-error: true
         env:
-          FEED_PUSH: '1'
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I archive.py --data data
+
+      - name: Feed + scanner + market recorder (~5.5 h; data saved + pushed every 30 min, live picture every 5 min)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HL_GZIP: '1'
+          HL_PLAN: '1'
         run: |
-          git config user.name "hl-feed"
-          git config user.email "hl-feed@users.noreply.github.com"
-          touch "$RUNNER_TEMP/started"
-          python3 -I feed_listen.py 20400 --out data
+          git config user.name "hl-live"
+          git config user.email "hl-live@users.noreply.github.com"
+          python3 -I hl_live.py --out data
+
+      - name: Keep the scanner state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: hl-state-${{ github.run_id }}
 
       - name: Save the data
-        if: always()
+        if: always()              # whatever happened above, never lose what was read
         run: |
-          git config user.name "hl-feed"
-          git config user.email "hl-feed@users.noreply.github.com"
-          for p in data/feed data/feed_recent data/big_trades data/bybit_liq; do [ -e "$p" ] && git add "$p"; done
+          git config user.name "hl-live"
+          git config user.email "hl-live@users.noreply.github.com"
+          git add data
           if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
-          git commit -q -m "feed $(date -u +%Y-%m-%d_%H%M)"
+          git commit -q -m "live final $(date -u +%Y-%m-%d_%H%M)"
           for i in 1 2 3 4 5; do
             git pull --rebase -X theirs -q || { git rebase --abort 2>/dev/null; git pull --no-rebase -X ours -q --no-edit; }
             git push -q && exit 0
             sleep 15
           done
-          # last resort (e.g. the history was restarted meanwhile): only this run's new files, on top of the current main
-          git fetch -q origin main && git reset -q --mixed origin/main
-          find data/feed data/feed_recent data/big_trades data/bybit_liq -type f -newer "$RUNNER_TEMP/started" -print0 2>/dev/null | xargs -0 -r git add
-          git commit -q -m "feed $(date -u +%Y-%m-%d_%H%M) (re-applied)" && git push -q && exit 0
           exit 1

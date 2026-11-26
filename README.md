@@ -1,6 +1,16 @@
 # Hyperliquid public data collector
 
-Two GitHub Actions jobs save **public** market data into `data/` as CSV:
+**Since 26 Nov 2026 one always-on job does the work:** `feed.yml` ("HL live", `hl_live.py`) runs the trade feed, the position scanner
+and a 1-minute market recorder together, ~5.5 h per run, restarted back-to-back. A position can only change through a trade and the feed
+sees every BTC / ETH trade with both addresses, so accounts are re-read **within ~1-2 minutes of trading**; accounts within 2 % of their
+liquidation price every 2 min (2-5 %: 10 min); the top 1,500 + every position >= $1M every 15 min; everyone else rolling. The same files
+as before are written every 30 minutes (:00 / :30, same formats - positions files have 2 more columns at the end: `account_ntl_usd`,
+`account_margin_usd` = the whole account across all coins), the `live` branch every 5 minutes (`status.json` has `"mode": "live"`).
+`runs.csv` `mode` = `live` marks these windows - **a data break**: from then on readings are fresher and flows more complete, so research
+must not mix the periods without saying so. `scan.yml` is now the automatic **backup**: started every 30 min, it only scans when the live
+picture is more than 20 minutes old. New files: `flows_1m/`, `market_1m/`, `walls/` (below).
+
+Before 26 Nov 2026, two GitHub Actions jobs saved the data:
 - `scan.yml` every **30 minutes**: the top 1,500 Hyperliquid accounts + every account holding >= $1M of BTC / ETH + every account that
   just traded >= $250k on each run; 4,000 more per run: first those that traded >= $10k since their last reading, then the longest-unread
   ones (an account holding a position is re-read 3x as often as an empty one). Pool = leaderboard accounts worth >= $10k + addresses
@@ -37,6 +47,11 @@ vs the reported change, ratio 1.01), so one side = openInterest / 2. Shares in `
 | `data/accounts/<date>.csv.gz` | the public leaderboard rows used (account value, P&L + volume per window) |
 | `data/collector/deribit/...` + `data/collector/deribit_summary.csv` | Deribit options snapshot every run |
 | `data/collector/<name>_<YYYY-MM>.csv` | Hyperliquid market snapshot every run; Binance open interest / long-short / taker 1H + Hyperliquid 1H candles once a day |
+| `data/flows_1m/<date>.csv` | **(live job, from 26 Nov 2026)** every minute, per coin + group (`mm` market makers / `top` top-100 traders / `whale` other positions >= $1M / `other` everyone else): $ bought, $ sold, net, taker buys / sells (who crossed the spread) - exact, from every trade (each trade has a buyer and a seller, so the groups add up to zero) |
+| `data/market_1m/<date>.csv` | **(live job)** every minute, per coin: price, mark, oracle, funding (1 h), open interest (both sides, coins) + one side ($), premium, day volume, best bid / ask, spread (basis points), order book $ within 0.5 / 1 / 2 % |
+| `data/walls/<date>/<HHMM>.csv.gz` | **(live job)** plain limit orders >= $100k of the 100 biggest trader positions (not stops - those stay in `orders/`): side, price, size, $, placed time |
+| branch `live` (live job) | also `flows_1m.csv` + `market_1m.csv` (last 24 h), `walls.csv`, `big_trades_now.csv` (the current half hour's taker orders >= $100k) |
+| `data/collector/etf_flows_<btc or eth>_<YYYY-MM>.csv` | US spot Bitcoin / Ether ETF net flows per day (Farside; newer values win); `etf_firstseen_<btc or eth>_...` = each day as FIRST seen, once the biggest fund (IBIT / ETHA) has reported - never overwritten |
 | `data/archive_log.csv` | what the monthly archive moved where |
 
 **Monthly archive (since 25 Nov 2026):** from the 2nd of each month, the raw per-run / per-day folders of earlier months (positions,

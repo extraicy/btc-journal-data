@@ -4,7 +4,7 @@ From the 2nd of a month, the raw per-run files of every earlier month are packed
 the GitHub release 'archive-YYYY-MM' of this repository (public, free). Only after GitHub reports every upload with the right size
 are those files removed from the repository - nothing is deleted before its copy is safely in the release.
 
-  archived (raw, per run / per day):  positions, orders, changes, fills, feed, feed_recent, big_trades, bybit_liq, levels, levels_core,
+  archived (raw, per run / per day):  positions, orders, changes, fills, feed, feed_recent, big_trades, bybit_liq, levels, levels_core, walls, flows_1m, market_1m,
                                       accounts, collector/deribit
   kept in the repo (one file per month or one cumulative file): summary.csv, summary_all.csv, intelligence.csv, runs.csv,
                                       liquidations.csv, scanner_log.csv, collector/<name>_<YYYY-MM>.csv, collector/deribit_summary.csv
@@ -18,7 +18,7 @@ import csv, datetime as dt, glob, json, os, re, subprocess, sys, tarfile
 args = sys.argv[1:]
 DATA = args[args.index('--data') + 1] if '--data' in args else 'data'
 DRY = '--dry-run' in args
-FOLDERS = ['positions', 'orders', 'changes', 'fills', 'feed', 'feed_recent', 'big_trades', 'bybit_liq', 'levels', 'levels_core',
+FOLDERS = ['positions', 'orders', 'changes', 'fills', 'feed', 'feed_recent', 'big_trades', 'bybit_liq', 'levels', 'levels_core', 'walls', 'flows_1m', 'market_1m',
            'accounts', os.path.join('collector', 'deribit')]
 WORK = os.environ.get('RUNNER_TEMP') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'archive_tmp')
 

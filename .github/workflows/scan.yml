@@ -1,5 +1,7 @@
-# Hyperliquid position scanner - runs in GitHub Actions every 30 minutes (plan mode: top accounts + big positions + accounts that just
-# traded every run, everyone else by how long they've been unread). Public data only, no keys. Saves into data/ in this repository.
+# Hyperliquid position scanner - the BACKUP since 26 Nov 2026: the always-on job (feed.yml "HL live", hl_live.py) normally does the scanning.
+# Still started every 30 minutes, but it only scans when the live picture is more than 20 minutes old (the live job is down); otherwise it
+# stops after a few seconds. Plan mode: top accounts + big positions + accounts that just traded every run, everyone else by how long
+# they've been unread. Public data only, no keys. Saves into data/ in this repository.
 name: HL scanner
 run-name: HL scanner (${{ inputs.source || github.event_name }})
 
@@ -28,7 +30,21 @@ jobs:
         with:
           ref: main          # always the LATEST code + data, even when an old run is re-run
 
+      - name: Is the live job healthy? (then this backup scan is not needed)
+        id: check
+        run: |
+          git fetch -q --depth 1 origin live 2>/dev/null && git show FETCH_HEAD:status.json > /tmp/status.json 2>/dev/null || echo '{}' > /tmp/status.json
+          python3 -I - <<'PY'
+          import json, time, datetime as d, os
+          s = json.load(open('/tmp/status.json')); u = s.get('updated_utc'); mode = s.get('mode', 'scanner')
+          age = (time.time() - d.datetime.strptime(u, '%Y-%m-%d %H:%M').replace(tzinfo=d.timezone.utc).timestamp()) / 60 if u else 999
+          skip = mode == 'live' and age < 20
+          print(f'live picture: {age:.0f} min old, made by {mode} -> ' + ('healthy, no backup scan needed' if skip else 'BACKUP SCAN'))
+          open(os.environ['GITHUB_OUTPUT'], 'a').write('skip=' + ('true' if skip else 'false') + chr(10))
+          PY
+
       - name: Collector (Binance 30-day sets + Hyperliquid candles once a day, Hyperliquid snapshot every run)
+        if: steps.check.outputs.skip != 'true'
         env:
           POS_OUT: data/collector
           POS_MONTHLY: '1'      # one small file per month (keeps the git history small)
@@ -36,6 +52,7 @@ jobs:
         run: python3 -I collect.py --cloud || echo "collector failed - scanner still runs"
 
       - name: Restore the scanner state (latest known position of every account - kept in the cache, not in git)
+        if: steps.check.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
           path: state
@@ -43,6 +60,7 @@ jobs:
           restore-keys: hl-state-
 
       - name: Scan Hyperliquid
+        if: steps.check.outputs.skip != 'true'
         env:
           HL_GZIP: '1'            # one compressed file per run
           HL_PLAN: '1'            # top 1,500 + big positions + accounts that just traded every run, the rest by how long unread
@@ -52,6 +70,7 @@ jobs:
         run: python3 -I hl_scanner.py --n 1500 --out data
 
       - name: Publish the latest picture for the website (branch 'live' - replaced every run, so it never grows)
+        if: steps.check.outputs.skip != 'true'
         continue-on-error: true   # a failed website push must never stop the data being saved (it did on 24 Nov 2026 22:30)
         run: |
           [ -f live/status.json ] || { echo "no live files"; exit 0; }
@@ -64,20 +83,21 @@ jobs:
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" live
 
       - name: Keep the scanner state
-        if: always()
+        if: always() && steps.check.outputs.skip != 'true'
         uses: actions/cache/save@v4
         with:
           path: state
           key: hl-state-${{ github.run_id }}
 
       - name: Monthly archive (from the 2nd - last month's raw files go to the release 'archive-YYYY-MM', then leave the repo)
+        if: steps.check.outputs.skip != 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -I archive.py --data data
 
       - name: Save the data
-        if: always()              # whatever the steps above did, never lose what was read
+        if: always() && steps.check.outputs.skip != 'true'              # whatever the steps above did, never lose what was read
         run: |
           git config user.name "hl-scanner"
           git config user.email "hl-scanner@users.noreply.github.com"

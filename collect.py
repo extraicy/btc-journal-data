@@ -7,6 +7,9 @@ Records (CSV):
   binance_topls_1h_<C>     top traders' long / short position ratio, 1H (30 days)
   binance_taker_1h_<C>     taker buy / sell volume, 1H                  (30 days)
   etf_flows_btc            US spot Bitcoin ETF net flows per day, US$ m (Farside; recorded from 25 Nov 2026)
+  etf_flows_eth            the same for US spot Ether ETFs (Farside /eth/; from 26 Nov 2026)
+  etf_firstseen_<btc|eth>  each day's ETF numbers AS FIRST SEEN (never overwritten) - backup for the ETH ETF forward test (I-138 S2):
+                           a late PC row can be checked against what was published on time
   hl_candles_1h_<C>        Hyperliquid 1H candles                       (Hyperliquid keeps only ~5000 candles)
   hl_ctx_<C>               Hyperliquid snapshot NOW: funding, open interest, premium, mark / oracle price, day volume
                            (no history exists at all - only the hours this ran)
@@ -71,17 +74,17 @@ def deribit_options():
     return deribit.run()
 
 
-def etf_flows():
+def etf_flows(coin='btc'):
     """US spot Bitcoin ETF net flows, US$ millions per trading day (owner's go 25 Nov 2026 ~23:35 UTC, market-condition research).
     Farside's open page (farside.co.uk/btc/) shows only the last ~3 weeks and the full-history page is behind a bot check,
     so we record it ourselves from now on (merge = newer values win, so late fund reports overwrite the first reading).
     Row time = that day 00:00 UTC; days not reported yet ("-") are skipped."""
     import html as _h, re as _re, urllib.request as _u, datetime as _dt
-    req = _u.Request('https://farside.co.uk/btc/', headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    req = _u.Request(f'https://farside.co.uk/{coin}/', headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
     page = _u.urlopen(req, timeout=30).read().decode('utf-8', 'replace')
     cells = lambda r: [_h.unescape(_re.sub(r'<[^>]+>', '', c)).strip() for c in _re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', r, _re.S)]
     rows = [cells(r) for r in _re.findall(r'<tr[^>]*>(.*?)</tr>', page, _re.S)]
-    head = next((r for r in rows if 'IBIT' in r), None)
+    head = next((r for r in rows if ('IBIT' in r if coin == 'btc' else 'ETHA' in r)), None)
     if not head: raise RuntimeError('farside: table header not found')
     def val(s):
         s = s.replace(',', '').strip()
@@ -94,9 +97,17 @@ def etf_flows():
         if total is None: continue
         t = int(_dt.datetime.strptime(r[0], '%d %b %Y').replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
         funds = ';'.join(f'{n}:{val(v)}' for n, v in zip(head[1:-1], r[1:-1]) if n and val(v) is not None)
-        out.append((t, [total, funds]))
-    a, n = P.merge('etf_flows_btc', ['total_usd_m', 'funds_usd_m'], out)
-    return [f'etf_flows_btc +{a} ({n} days)']
+        main = dict(zip(head, r)).get('IBIT' if coin == 'btc' else 'ETHA')
+        out.append((t, [total, funds], val(main or '') is not None))   # False = the biggest fund has not reported yet (day not final)
+    a, n = P.merge(f'etf_flows_{coin}', ['total_usd_m', 'funds_usd_m'], [(t, v) for t, v, _ in out])
+    # first-seen copy: a day is written once and never changed (late fund reports only go into etf_flows_<coin>)
+    now = P.iso(P.now_ms()); fs = f'etf_firstseen_{coin}'; new = []
+    for t, vals, ready in out:
+        if not ready: continue
+        _, have = P.read(f'{fs}_{P.iso(t)[:7]}' if P.MONTHLY else fs)
+        if t not in have: new.append((t, vals + [now]))
+    if new: P.merge(fs, ['total_usd_m', 'funds_usd_m', 'recorded_utc'], new)
+    return [f'etf_flows_{coin} +{a} ({n} days, {len(new)} first seen)']
 
 
 def run(coins=COINS, snapshot=True):
@@ -104,7 +115,7 @@ def run(coins=COINS, snapshot=True):
     jobs = [lambda: hl_snapshot(coins), deribit_options] if snapshot else []
     for c in coins:
         jobs += [lambda c=c: binance_30d(c), lambda c=c: [hl_candles(c)]]
-    jobs.append(etf_flows)
+    jobs += [etf_flows, lambda: etf_flows('eth')]
     for j in jobs:
         try:
             lines += j()
